@@ -1,0 +1,1 @@
+rm -rf /var/www/html/*.html && echo ' <?php header("Content-Type: text/plain"); echo "Hello, world! "; ?>' > /var/www/html/index.php && /etc/init.d/apache2 restart

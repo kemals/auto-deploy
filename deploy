@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+import os
+import paramiko
+import argparse
+import json
+
+
+class Deployment:
+    def __init__(self, username, password):
+        self.username = username
+        self.password = password
+        self.templates = 'templates/'
+
+    def read_from_template(self):
+        with open(self.templates + 'template.json', 'r') as fh:
+            data = json.load(fh)
+            return data
+
+    def write_to_template(self, key, host):
+        data = self.read_from_template()
+        with open(self.templates + 'template.json', 'w') as fh:
+            data[key].append(host)
+            fh.write(json.dumps(data))
+        fh.close()
+
+    def add_host(self, host):
+        self.write_to_template('hosts', host)
+
+    def add_packages(self, package):
+        self.write_to_template('packages', package)
+
+    def connect(self, host):
+        client = paramiko.Transport((host, 22))
+        client.connect(username=self.username, password=self.password)
+        session = client.open_channel(kind='session')
+        return session
+
+    def verify_session(self, session):
+        nbytes = 9002
+        stdout_data = []
+        stderr_data = []
+        while True:
+            if session.exit_status_ready():
+                while True:
+                    ret = session.recv(nbytes)
+                    if len(ret) == 0:
+                        break
+                    stdout_data.append(ret)
+                while True:
+                    ret = session.recv_stderr(nbytes)
+                    if len(ret) == 0:
+                        break
+                    stderr_data.append(ret)
+                break
+        return (stdout_data, stderr_data)
+
+    def remove(self):
+        data = self.read_from_template()
+        for host in data['hosts']:
+            for package in data['packages']:
+                session = self.connect(host)
+                print('Removing package {} from {}'.format(package, host))
+                session.exec_command('apt-get remove {} -y'.format(package))
+                out, err = self.verify_session(session)
+                print(str(out[0], 'utf-8'))
+                session.close()
+
+    def install(self):
+        command = 'apt-get install -y '
+        data = self.read_from_template()
+        for host in data['hosts']:
+            session = self.connect(host)
+            print('Installing packages {} on host {}'.format(
+                data['packages'], host))
+            pkg = " && apt-get install -y ".join(data['packages'])
+            session.exec_command(command + pkg)
+            out, err = self.verify_session(session)
+            print(str(out[0], 'utf-8'))
+            session.close()
+
+    def restart(self, service, host):
+        command = '/etc/init.d/%s restart' % service
+        session = self.connect(host)
+        print('Preparing to restart service {} on host {}'.format(
+            service, host))
+        session.exec_command(command)
+        out, err = self.verify_session(session)
+        print(str(out[0], 'utf-8'))
+
+    def validate(self):
+        data = self.read_from_template()
+        for host in data['hosts']:
+            print('Starting package validation: {} on host {}'.format(
+                data['packages'], host))
+            validate_command = [
+                str('apt list --installed ' + x) for x in data['packages']
+            ]
+            for command in validate_command:
+                session = self.connect(host)
+                session.exec_command(command)
+                out, err = self.verify_session(session)
+                if '[installed]' in str(out[0], 'utf-8'):
+                    print('Package {} is installed!'.format(
+                        command.split()[-1]))
+                else:
+                    print('Package {} not installed!'.format(
+                        command.split()[-1]))
+                session.close()
+
+    def deploy(self):
+        data = self.read_from_template()
+        with open(self.templates + 'php.template', 'r') as fh:
+            command = fh.readlines()
+            print(command)
+            for host in data['hosts']:
+                session = self.connect(host)
+                print('Deploying website for testing')
+                session.exec_command(command[0])
+                print('Please execute curl -sv http://{}'.format(host))
+        fh.close()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--add_host', help="Add new host")
+    parser.add_argument('--add_package', help='Add new package')
+    parser.add_argument(
+        '--remove', action='store_true', help='Remove the specified packages')
+    parser.add_argument(
+        '--install', action='store_true', help='Provision hosts')
+    parser.add_argument(
+        '--validate', action='store_true', help='Validate hosts')
+    parser.add_argument(
+        '--deploy', action='store_true', help='Deploy test website')
+    parser.add_argument('--service_restart', help='Specify service to restart')
+    parser.add_argument('--host', help='Specify destination host')
+
+    args = parser.parse_args()
+
+    if "PASSWORD" in os.environ:
+        password = os.environ['PASSWORD']
+        try:
+            deploy = Deployment('root', password)
+            if args.validate:
+                deploy.validate()
+            elif args.remove:
+                deploy.remove()
+            elif args.install:
+                deploy.install()
+            elif args.add_host:
+                deploy.add_host(args.add_host)
+            elif args.deploy:
+                deploy.deploy()
+            elif args.add_package:
+                deploy.add_packages(args.add_package)
+            elif args.service_restart and args.host:
+                deploy.restart(args.service_restart, args.host)
+            else:
+                print('Please specify both service and host')
+        except Exception as e:
+            print('There was problem: {}'.format(e))
+    else:
+        print('Set password with: export PASSWORD=password')
+
+
+if __name__ == "__main__":
+    main()
